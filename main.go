@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/containerd/console"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 type MetaCommandResult int
@@ -79,7 +79,7 @@ func main() {
 		return
 	}
 
-	term := terminal.NewTerminal(current, "db > ")
+	term := term.NewTerminal(current, "db > ")
 
 	for {
 		line, err := term.ReadLine()
