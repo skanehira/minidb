@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -26,6 +27,7 @@ type ExecuteResult int
 const (
 	EXECUTE_SUCCESS ExecuteResult = iota + 1
 	EXECUTE_TABLE_FULL
+	EXECUTE_DESERIALIZE_FAIL
 )
 
 const (
@@ -33,10 +35,15 @@ const (
 	COLUMN_EMAIL_SIZE    = 255
 )
 
-type Row struct {
-	ID       uint32
+type (
 	UserName [COLUMN_USERNAME_SIZE]byte
 	Email    [COLUMN_EMAIL_SIZE]byte
+)
+
+type Row struct {
+	ID       uint32
+	UserName UserName
+	Email    Email
 }
 
 func (r Row) Bytes() []byte {
@@ -163,7 +170,7 @@ func DeserializeRow(page *Page, rowOffset uint32, row *Row) error {
 }
 
 func ExecuteInsert(stmt *Statement, table *Table) ExecuteResult {
-	if table.NumRow > TABLE_MAX_ROWS {
+	if table.NumRow >= TABLE_MAX_ROWS {
 		return EXECUTE_TABLE_FULL
 	}
 
@@ -174,17 +181,16 @@ func ExecuteInsert(stmt *Statement, table *Table) ExecuteResult {
 	return EXECUTE_SUCCESS
 }
 
-func ExecuteSelect(stmt *Statement, table *Table) ExecuteResult {
+func ExecuteSelect(stmt *Statement, table *Table) ([]Row, ExecuteResult) {
+	var rows []Row
 	for i := 0; i < int(table.NumRow); i++ {
 		page, rowOffset := RowSlot(table, uint32(i))
-		var row Row
 		if err := DeserializeRow(page, rowOffset, &row); err != nil {
-			log.Println(err)
-			continue
+			return nil, EXECUTE_DESERIALIZE_FAIL
 		}
-		fmt.Println(row)
+		rows = append(rows, row)
 	}
-	return EXECUTE_SUCCESS
+	return rows, EXECUTE_SUCCESS
 }
 
 func DoMetaCommand(cmd string) MetaCommandResult {
@@ -194,35 +200,42 @@ func DoMetaCommand(cmd string) MetaCommandResult {
 	return META_COMMAND_UNRECOGNIZED_COMMAND
 }
 
-func scanInput(line string, row *Row) int {
+var (
+	ErrTooManyRows     = errors.New("too many rows")
+	ErrStringIsTooLong = errors.New("string is too long")
+)
+
+func ScanInput(line string, row *Row) error {
 	col := strings.Split(line, " ")
 	if len(col) != 4 {
-		return len(col)
+		return ErrTooManyRows
 	}
 
 	id, err := strconv.ParseUint(col[1], 10, 32)
 	if err != nil {
-		log.Println(err)
-		return 0
+		return fmt.Errorf("id is is not a number: %w", err)
 	}
 	row.ID = uint32(id)
 
-	if copy(row.UserName[:], []byte(col[2])) == 0 {
-		return 1
+	if len(col[2]) > COLUMN_USERNAME_SIZE {
+		return fmt.Errorf("invalid user name: %w", ErrStringIsTooLong)
 	}
+	copy(row.UserName[:], []byte(col[2]))
 
-	if copy(row.Email[:], []byte(col[3])) == 0 {
-		return 2
+	if len(col[3]) > COLUMN_EMAIL_SIZE {
+		return fmt.Errorf("invalid email: %w", ErrStringIsTooLong)
 	}
+	copy(row.Email[:], []byte(col[3]))
 
-	return len(col)
+	return nil
 }
 
 func PrepareStatement(line string, stmt *Statement) PrepareResult {
 	if len(line) >= 6 && line[:6] == "insert" {
 		stmt.Type = STATEMENT_INSERT
-		argsAssigned := scanInput(line, &stmt.RowToInsert)
-		if argsAssigned < 3 {
+		err := ScanInput(line, &stmt.RowToInsert)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			return PREPARE_SYNTAX_ERROR
 		}
 		return PREPARE_SUCCESS
@@ -239,7 +252,13 @@ func ExecuteStatement(stmt *Statement, table *Table) ExecuteResult {
 	case STATEMENT_INSERT:
 		return ExecuteInsert(stmt, table)
 	case STATEMENT_SELECT:
-		return ExecuteSelect(stmt, table)
+		rows, result := ExecuteSelect(stmt, table)
+		if result != EXECUTE_SUCCESS {
+			return result
+		}
+		for _, row := range rows {
+			fmt.Println(row)
+		}
 	}
 	return EXECUTE_SUCCESS
 }
@@ -273,7 +292,7 @@ func main() {
 			case META_COMMAND_SUCCESS:
 				continue
 			case META_COMMAND_UNRECOGNIZED_COMMAND:
-				fmt.Printf("Unrecognized command '%s'.\n", line)
+				fmt.Printf("unrecognized command '%s'.\n", line)
 				continue
 			}
 		}
@@ -283,10 +302,10 @@ func main() {
 		case PREPARE_SUCCESS:
 			break
 		case PREPARE_SYNTAX_ERROR:
-			fmt.Println("Syntax error. Could not parse statement.")
+			fmt.Fprintln(os.Stderr, "syntax error. Could not parse statement.")
 			continue
 		case PREPARE_UNRECOGNIZED_STATEMENT:
-			fmt.Printf("Unrecognized keyword at start of '%s'.\n", line)
+			fmt.Fprintf(os.Stderr, "unrecognized keyword at start of '%s'.\n", line)
 			continue
 		}
 
@@ -294,7 +313,7 @@ func main() {
 		case EXECUTE_SUCCESS:
 			fmt.Println("Executed.")
 		case EXECUTE_TABLE_FULL:
-			fmt.Println("Error: Table full.")
+			fmt.Println("error: table full.")
 		}
 	}
 }
