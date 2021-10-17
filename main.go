@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
@@ -62,9 +63,72 @@ func (r Row) String() string {
 	return fmt.Sprintf(`{"id": %d, "user_name": "%s", "email": "%s"}`, r.ID, name, email)
 }
 
-func NewTable() *Table {
-	t := &Table{}
+func DBOpen(fileName string) *Table {
+	pager := PagerOpen(fileName)
+	numRow := pager.FileLength / ROW_SIZE
+	t := &Table{
+		NumRow: numRow,
+		Pager:  pager,
+	}
 	return t
+}
+
+func DBClose(table *Table) {
+	pager := table.Pager
+	// 現時点のMaxページ数
+	numFullPages := table.NumRow / ROWS_PER_PAGE
+
+	for i := 0; i < int(numFullPages); i++ {
+		if pager.Pages[i] == nil {
+			continue
+		}
+		pagerFlush(pager, int64(i), int64(PAGE_SIZE))
+	}
+
+	numAdditionalRows := table.NumRow % ROWS_PER_PAGE
+	if numAdditionalRows > 0 {
+		pageNum := numFullPages
+
+		if pager.Pages[pageNum] != nil {
+			pagerFlush(pager, int64(pageNum), int64(numAdditionalRows*ROW_SIZE))
+		}
+	}
+
+	if err := pager.File.Close(); err != nil {
+		exitError(fmt.Errorf("error closing db file: %w\n", err))
+	}
+}
+
+func pagerFlush(pager *Pager, pageNum, size int64) {
+	if pager.Pages[pageNum] == nil {
+		exitError("tried to flush null page")
+	}
+	if _, err := pager.File.Seek(pageNum*int64(PAGE_SIZE), 0); err != nil {
+		exitError(fmt.Sprintf("error seeking: %s\n", err))
+	}
+	if _, err := pager.File.Write(pager.Pages[pageNum][:size]); err != nil {
+		exitError(fmt.Sprintf("error writing: %s\n", err))
+	}
+}
+
+func PagerOpen(fileName string) *Pager {
+	f, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		exitError(fmt.Sprintf("unable to open file: %s\n", fileName))
+	}
+
+	fi, err := os.Stat(fileName)
+	if err != nil {
+		exitError(fmt.Sprintf("unable to get file info: %s\n", fileName))
+	}
+
+	pager := &Pager{
+		FileLength: uint32(fi.Size()),
+	}
+
+	pager.File = f
+
+	return pager
 }
 
 var row Row
@@ -108,9 +172,20 @@ func (p Page) String() string {
 	return builder.String()
 }
 
+type DBFile interface {
+	io.ReadWriteSeeker
+	io.Closer
+}
+
+type Pager struct {
+	File       DBFile
+	FileLength uint32
+	Pages      [TABLE_MAX_PAGES]*Page
+}
+
 type Table struct {
 	NumRow uint32 // 合計レコード数
-	Pages  [TABLE_MAX_PAGES]*Page
+	Pager  *Pager
 }
 
 type Statement struct {
@@ -133,6 +208,44 @@ const (
 	PREPARE_UNRECOGNIZED_STATEMENT
 )
 
+func GetPage(pager *Pager, pageNum uint32) *Page {
+	if pageNum > TABLE_MAX_PAGES {
+		exitError(fmt.Sprintf("tried to fetch page number out of bounds: %d\n", TABLE_MAX_PAGES))
+	}
+
+	page := pager.Pages[pageNum]
+	if page == nil {
+		// メモリにページが存在しない場合は初期化
+		pager.Pages[pageNum] = &Page{}
+		page = pager.Pages[pageNum]
+	}
+
+	// 現在のページ数を取得
+	numPages := pager.FileLength / PAGE_SIZE
+	// あまりがある場合は、+1ページ
+	if pager.FileLength%PAGE_SIZE != 0 {
+		numPages++
+	}
+
+	// 今のページが現在のページ数内に収まる場合はファイルからデータを取得
+	if pageNum < numPages {
+		// ページのoffsetにシーク
+		_, err := pager.File.Seek(int64(pageNum*PAGE_SIZE), 0)
+		if err != nil {
+			exitError(fmt.Sprintf("error seeking: %s\n", err))
+		}
+
+		_, err = pager.File.Read(page[:])
+		if err != nil {
+			exitError(fmt.Sprintf("error reading: %s\n", err))
+		}
+
+		// ページデータを読む取る
+	}
+
+	return page
+}
+
 func RowSlot(table *Table, rowNum uint32) (*Page, uint32) {
 	// 合計レコード数 / 1ページあたりのレコード数 = ページのindex
 	// 例）1ページで保存できるレコード数は3件だとすると
@@ -141,11 +254,8 @@ func RowSlot(table *Table, rowNum uint32) (*Page, uint32) {
 	// 6/3 = 2
 	// ...
 	pageNum := rowNum / ROWS_PER_PAGE
-	page := table.Pages[pageNum]
-	if page == nil {
-		table.Pages[pageNum] = &Page{}
-		page = table.Pages[pageNum]
-	}
+
+	page := GetPage(table.Pager, pageNum)
 
 	// 合計レコード数 % 1ページあたりのレコード数 = ページ内のレコードのindex
 	// 例） 1%3 = 1
@@ -162,7 +272,8 @@ func SerializeRow(row Row, page *Page, rowOffset uint32) {
 func DeserializeRow(page *Page, rowOffset uint32, row *Row) error {
 	start := rowOffset * ROW_SIZE
 	end := start + ROW_SIZE
-	buf := bytes.NewReader(page[start:end])
+	data := page[start:end]
+	buf := bytes.NewReader(data)
 	if err := binary.Read(buf, binary.BigEndian, row); err != nil {
 		return err
 	}
@@ -193,8 +304,9 @@ func ExecuteSelect(stmt *Statement, table *Table) ([]Row, ExecuteResult) {
 	return rows, EXECUTE_SUCCESS
 }
 
-func DoMetaCommand(cmd string) MetaCommandResult {
+func DoMetaCommand(cmd string, table *Table) MetaCommandResult {
 	if strings.HasSuffix(cmd, ".exit") {
+		DBClose(table)
 		os.Exit(0)
 	}
 	return META_COMMAND_UNRECOGNIZED_COMMAND
@@ -203,6 +315,7 @@ func DoMetaCommand(cmd string) MetaCommandResult {
 var (
 	ErrTooManyRows     = errors.New("too many rows")
 	ErrStringIsTooLong = errors.New("string is too long")
+	ErrDataIsEmpty     = errors.New("data is empty")
 )
 
 func ScanInput(line string, row *Row) error {
@@ -263,8 +376,16 @@ func ExecuteStatement(stmt *Statement, table *Table) ExecuteResult {
 	return EXECUTE_SUCCESS
 }
 
+func exitError(err interface{}) {
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
+}
+
 func main() {
-	table := NewTable()
+	if len(os.Args) != 2 {
+		exitError("must supply a database filename.\n")
+	}
+	table := DBOpen(os.Args[1])
 	current := console.Current()
 	if err := current.DisableEcho(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -288,7 +409,7 @@ func main() {
 		}
 
 		if line[0] == '.' {
-			switch DoMetaCommand(line) {
+			switch DoMetaCommand(line, table) {
 			case META_COMMAND_SUCCESS:
 				continue
 			case META_COMMAND_UNRECOGNIZED_COMMAND:
