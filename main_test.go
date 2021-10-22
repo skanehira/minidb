@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -69,9 +71,25 @@ func TestSerializeAndDeserializeRow(t *testing.T) {
 	}
 }
 
+func mkTmpFile(t *testing.T) (string, func()) {
+	f, err := ioutil.TempFile("", "")
+	if err != nil {
+		t.Fatalf("failed to create tmp file: %s", err)
+	}
+	defer f.Close()
+	clean := func() {
+		_ = os.Remove(f.Name())
+	}
+	return f.Name(), clean
+}
+
 func TestExecuteStatement(t *testing.T) {
 	t.Run("insert tow record", func(t *testing.T) {
-		table := NewTable()
+		fileName, clean := mkTmpFile(t)
+		t.Cleanup(func() {
+			clean()
+		})
+		table := DBOpen(fileName)
 
 		insertRows := []Row{
 			{
@@ -111,7 +129,11 @@ func TestExecuteStatement(t *testing.T) {
 	})
 
 	t.Run("got error message when table is full", func(t *testing.T) {
-		table := NewTable()
+		fileName, clean := mkTmpFile(t)
+		t.Cleanup(func() {
+			clean()
+		})
+		table := DBOpen(fileName)
 
 		insertRow := Row{
 			ID:       1,
