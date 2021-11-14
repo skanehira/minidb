@@ -326,7 +326,7 @@ func ScanInput(line string, row *Row) error {
 
 	id, err := strconv.ParseUint(col[1], 10, 32)
 	if err != nil {
-		return fmt.Errorf("id is is not a number: %w", err)
+		return fmt.Errorf("id is not a number: %w", err)
 	}
 	row.ID = uint32(id)
 
