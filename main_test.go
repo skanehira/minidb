@@ -34,6 +34,10 @@ func TestPrepareStatement(t *testing.T) {
 			line:       "selec",
 			wantResult: PREPARE_UNRECOGNIZED_STATEMENT,
 		},
+		{
+			line:       "",
+			wantResult: PREPARE_UNRECOGNIZED_STATEMENT,
+		},
 	}
 
 	for _, tt := range tests {
