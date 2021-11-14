@@ -34,6 +34,10 @@ func TestPrepareStatement(t *testing.T) {
 			line:       "selec",
 			wantResult: PREPARE_UNRECOGNIZED_STATEMENT,
 		},
+		{
+			line:       "",
+			wantResult: PREPARE_UNRECOGNIZED_STATEMENT,
+		},
 	}
 
 	for _, tt := range tests {
@@ -209,7 +213,7 @@ func TestScanInput(t *testing.T) {
 			{
 				name: "invalid id",
 				line: "insert a b c",
-				want: "id is is not a number: strconv.ParseUint: parsing \"a\": invalid syntax",
+				want: "id is not a number: strconv.ParseUint: parsing \"a\": invalid syntax",
 			},
 			{
 				name: "too long user name",
